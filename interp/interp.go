@@ -8,6 +8,7 @@ import (
 	"go/scanner"
 	"go/token"
 	"os"
+	"os/signal"
 	"reflect"
 	"strconv"
 )
@@ -358,7 +359,10 @@ func (interp *Interpreter) Use(values Exports) {
 }
 
 // Repl performs a Read-Eval-Print-Loop on input file descriptor.
-// Results are printed on output.
+// Results are printed on output. Repl handles os.Interrupt and os.Kill
+// signals by canceling execution of any interpreted code. While the
+// REPL is not executing code these signals are not handled. On exit,
+// all signal handling is reset.
 func (interp *Interpreter) Repl(in, out *os.File) {
 	s := bufio.NewScanner(in)
 	prompt := getPrompt(in, out)
@@ -366,7 +370,12 @@ func (interp *Interpreter) Repl(in, out *os.File) {
 	src := ""
 	for s.Scan() {
 		src += s.Text() + "\n"
-		if v, err := interp.Eval(src); err != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		handleSignal(ctx, cancel)
+		v, err := interp.EvalWithContext(ctx, src)
+		signal.Reset()
+		if err != nil {
 			switch err.(type) {
 			case scanner.ErrorList:
 				// Early failure in the scanner: the source is incomplete
@@ -390,4 +399,17 @@ func getPrompt(in, out *os.File) func() {
 		return func() { fmt.Fprint(out, "> ") }
 	}
 	return func() {}
+}
+
+// handleSignal wraps signal handling for eval cancellation.
+func handleSignal(ctx context.Context, cancel context.CancelFunc) {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, os.Kill)
+	go func() {
+		select {
+		case <-c:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 }
